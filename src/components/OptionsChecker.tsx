@@ -34,6 +34,7 @@ interface ValidationResult {
   issues: string[];
   correctedQuestion?: ExtractedQuestion;
   status: 'pending' | 'checking' | 'valid' | 'fixed' | 'failed';
+  originalQuestion?: QuestionToCheck;
 }
 
 interface CheckProgress {
@@ -56,6 +57,7 @@ export function OptionsChecker() {
   
   const [questionsToCheck, setQuestionsToCheck] = useState<QuestionToCheck[]>([]);
   const [validationResults, setValidationResults] = useState<ValidationResult[]>([]);
+  const [displayValidationResults, setDisplayValidationResults] = useState<ValidationResult[]>([]);
   const [selectedQuestions, setSelectedQuestions] = useState<Set<string>>(new Set());
   
   const [progress, setProgress] = useState<CheckProgress>({
@@ -199,13 +201,15 @@ export function OptionsChecker() {
     });
 
     // Initialize validation results
-    const initialResults: ValidationResult[] = questionsToValidate.map(q => ({
+    const initialResults: ValidationResult[] = questionsToValidate.map((q, index) => ({
       id: q.id,
       isValid: false,
       issues: [],
-      status: 'pending'
+      status: 'pending',
+      originalQuestion: q
     }));
     setValidationResults(initialResults);
+    setDisplayValidationResults([]);
 
     try {
       await validateQuestionsInBulk(questionsToValidate);
@@ -214,6 +218,8 @@ export function OptionsChecker() {
       toast.error(`Validation failed: ${error.message}`);
     } finally {
       setProgress(prev => ({ ...prev, isChecking: false, isPaused: false }));
+      // Set display results after validation completes
+      setDisplayValidationResults([...validationResults]);
     }
   };
 
@@ -252,23 +258,26 @@ export function OptionsChecker() {
       ));
 
       try {
-        toast(`🔍 Checking question ${i + 1}/${questions.length}...`, { duration: 2000 });
+        toast(`🔍 Checking question ${i + 1}/${questions.length}: ${question.question_type}...`, { duration: 2000 });
 
-        const validation = await validateAndFixQuestion({
+        // Create a proper ExtractedQuestion object for validation
+        const questionForValidation: ExtractedQuestion = {
           question_statement: question.question_statement,
           question_type: question.question_type,
           options: question.options,
           answer: question.answer,
           solution: question.solution,
           page_number: 1
-        });
+        };
+
+        const validation = await validateAndFixQuestion(questionForValidation);
 
         if (validation.isValid && !validation.correctedQuestion) {
           // Question is already valid
           validCount++;
           setValidationResults(prev => prev.map(result => 
             result.id === question.id 
-              ? { ...result, isValid: true, issues: [], status: 'valid' }
+              ? { ...result, isValid: true, issues: [], status: 'valid', originalQuestion: question }
               : result
           ));
           toast.success(`✅ Question ${i + 1} is valid`);
@@ -283,7 +292,8 @@ export function OptionsChecker() {
                   isValid: true, 
                   issues: [validation.reason || 'Fixed automatically'], 
                   correctedQuestion: validation.correctedQuestion,
-                  status: 'fixed' 
+                  status: 'fixed',
+                  originalQuestion: question
                 }
               : result
           ));
@@ -297,7 +307,8 @@ export function OptionsChecker() {
                   ...result, 
                   isValid: false, 
                   issues: [validation.reason || 'Validation failed'], 
-                  status: 'failed' 
+                  status: 'failed',
+                  originalQuestion: question
                 }
               : result
           ));
@@ -325,7 +336,8 @@ export function OptionsChecker() {
                 ...result, 
                 isValid: false, 
                 issues: [`Error: ${error.message}`], 
-                status: 'failed' 
+                status: 'failed',
+                originalQuestion: question
               }
             : result
         ));
@@ -333,6 +345,8 @@ export function OptionsChecker() {
       }
     }
 
+    // Update display results after completion
+    setDisplayValidationResults([...validationResults]);
     toast.success(`🎉 Validation complete! Valid: ${validCount}, Fixed: ${fixedCount}, Failed: ${failedCount}`);
   };
 
@@ -658,7 +672,7 @@ export function OptionsChecker() {
         )}
 
         {/* Results Summary */}
-        {validationResults.length > 0 && !progress.isChecking && (
+        {displayValidationResults.length > 0 && !progress.isChecking && (
           <div className="bg-white rounded-2xl shadow-xl p-8">
             <h2 className="text-2xl font-bold text-gray-800 mb-6">
               🎉 Validation Results
@@ -667,33 +681,137 @@ export function OptionsChecker() {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
               <div className="bg-green-50 p-4 rounded-lg text-center">
                 <div className="text-2xl font-bold text-green-600">
-                  {validationResults.filter(r => r.status === 'valid').length}
+                  {displayValidationResults.filter(r => r.status === 'valid').length}
                 </div>
                 <div className="text-sm text-green-600">Already Valid</div>
               </div>
               <div className="bg-yellow-50 p-4 rounded-lg text-center">
                 <div className="text-2xl font-bold text-yellow-600">
-                  {validationResults.filter(r => r.status === 'fixed').length}
+                  {displayValidationResults.filter(r => r.status === 'fixed').length}
                 </div>
                 <div className="text-sm text-yellow-600">Fixed & Updated</div>
               </div>
               <div className="bg-red-50 p-4 rounded-lg text-center">
                 <div className="text-2xl font-bold text-red-600">
-                  {validationResults.filter(r => r.status === 'failed').length}
+                  {displayValidationResults.filter(r => r.status === 'failed').length}
                 </div>
                 <div className="text-sm text-red-600">Failed</div>
               </div>
               <div className="bg-blue-50 p-4 rounded-lg text-center">
                 <div className="text-2xl font-bold text-blue-600">
-                  {validationResults.length}
+                  {displayValidationResults.length}
                 </div>
                 <div className="text-sm text-blue-600">Total Checked</div>
               </div>
             </div>
             
+            {/* Detailed Question Previews */}
+            <div className="mt-8">
+              <h3 className="text-xl font-bold text-gray-800 mb-4">
+                📋 Detailed Validation Results
+              </h3>
+              
+              <div className="space-y-6 max-h-96 overflow-y-auto">
+                {displayValidationResults.map((result) => {
+                  const questionToShow = result.correctedQuestion || result.originalQuestion;
+                  if (!questionToShow) return null;
+                  
+                  return (
+                    <div
+                      key={result.id}
+                      className={`border-2 rounded-xl p-6 ${
+                        result.status === 'valid' ? 'border-green-200 bg-green-50' :
+                        result.status === 'fixed' ? 'border-yellow-200 bg-yellow-50' :
+                        'border-red-200 bg-red-50'
+                      }`}
+                    >
+                      {/* Status Header */}
+                      <div className="flex items-center justify-between mb-4">
+                        <div className="flex items-center gap-3">
+                          <span className={`flex items-center gap-2 px-3 py-1 rounded-full text-sm font-medium ${getStatusColor(result.status)}`}>
+                            {getStatusIcon(result.status)}
+                            {result.status.toUpperCase()}
+                          </span>
+                          
+                          <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                            questionToShow.question_type === 'MCQ' ? 'bg-blue-100 text-blue-800' :
+                            questionToShow.question_type === 'MSQ' ? 'bg-green-100 text-green-800' :
+                            questionToShow.question_type === 'NAT' ? 'bg-orange-100 text-orange-800' :
+                            'bg-purple-100 text-purple-800'
+                          }`}>
+                            {questionToShow.question_type}
+                          </span>
+                          
+                          {result.originalQuestion && (
+                            <span className="text-xs text-gray-500">
+                              Topic: {result.originalQuestion.topic_name}
+                            </span>
+                          )}
+                        </div>
+                        
+                        {result.correctedQuestion && (
+                          <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded">
+                            🔧 Auto-Fixed
+                          </span>
+                        )}
+                      </div>
+                      
+                      {/* Issues */}
+                      {result.issues.length > 0 && (
+                        <div className="mb-4 p-3 bg-white border border-gray-200 rounded-lg">
+                          <h4 className="text-sm font-medium text-gray-700 mb-2">Issues Found:</h4>
+                          <ul className="text-sm text-gray-600 space-y-1">
+                            {result.issues.map((issue, index) => (
+                              <li key={index} className="flex items-start gap-2">
+                                <span className="text-red-500 mt-0.5">•</span>
+                                {issue}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      
+                      {/* Question Preview */}
+                      <div className="bg-white rounded-lg p-4 border border-gray-200">
+                        <QuestionPreview 
+                          question={{
+                            question_statement: questionToShow.question_statement,
+                            question_type: questionToShow.question_type,
+                            options: questionToShow.options,
+                            answer: questionToShow.answer,
+                            solution: questionToShow.solution
+                          }}
+                        />
+                      </div>
+                      
+                      {/* Show both original and corrected if fixed */}
+                      {result.correctedQuestion && result.originalQuestion && (
+                        <details className="mt-4">
+                          <summary className="cursor-pointer text-sm font-medium text-gray-600 hover:text-gray-800">
+                            📋 View Original Question (Before Fix)
+                          </summary>
+                          <div className="mt-3 bg-gray-50 rounded-lg p-4 border border-gray-200">
+                            <QuestionPreview 
+                              question={{
+                                question_statement: result.originalQuestion.question_statement,
+                                question_type: result.originalQuestion.question_type,
+                                options: result.originalQuestion.options,
+                                answer: result.originalQuestion.answer,
+                                solution: result.originalQuestion.solution
+                              }}
+                            />
+                          </div>
+                        </details>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+            
             <button
               onClick={loadQuestionsToCheck}
-              className="flex items-center gap-2 px-4 py-2 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded-lg transition-colors"
+              className="flex items-center gap-2 px-4 py-2 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded-lg transition-colors mt-6"
             >
               <RefreshCw className="w-4 h-4" />
               Refresh Questions List

@@ -54,6 +54,15 @@ export interface ExtractedQuestion {
   uploaded_image?: string; // base64 image data
 }
 
+interface ValidationResult {
+  id: string;
+  isValid: boolean;
+  issues: string[];
+  correctedQuestion?: ExtractedQuestion;
+  status: 'pending' | 'checking' | 'valid' | 'fixed' | 'failed';
+  originalQuestion?: QuestionToCheck;
+}
+
 export async function analyzePageForQuestions(
   imageBase64: string,
   pageNumber: number,
@@ -904,8 +913,14 @@ VALIDATION CHECKS:
 2. For MCQ/MSQ: Do the options relate to the question? Are they plausible?
 3. Does the provided answer actually match one of the options (for MCQ/MSQ)?
 4. Is the answer mathematically/logically correct for the question?
-5. Does the solution (if provided) lead to the correct answer?
-6. Are there any obvious errors or inconsistencies?
+5. For NAT questions: Is the answer STRICTLY numerical (no text, units, or descriptions)?
+6. Does the solution (if provided) lead to the correct answer?
+7. Are there any obvious errors or inconsistencies?
+
+CRITICAL JSON ESCAPING RULES:
+- Use double backslashes (\\\\) for ALL LaTeX commands: "\\\\frac{1}{2}" not "\\frac{1}{2}"
+- Escape quotes within strings: "He said \\"hello\\"" not "He said "hello""
+- No unescaped backslashes or quotes in JSON strings
 
 RESPONSE FORMAT (JSON only):
 {
@@ -915,7 +930,7 @@ RESPONSE FORMAT (JSON only):
   "explanation": "Brief explanation of the validation result"
 }
 
-CRITICAL: Return ONLY valid JSON. Be thorough but concise.
+CRITICAL: Return ONLY valid JSON with proper escaping. Be thorough but concise.
 `;
 
       const result = await model.generateContent([prompt]);
@@ -981,10 +996,17 @@ FIXING INSTRUCTIONS:
 1. Keep the question statement as close to original as possible
 2. For MCQ: Ensure exactly ONE option is correct and matches the answer
 3. For MSQ: Ensure the correct combination of options matches the answer
-4. Fix mathematical errors in options or answer
-5. Ensure options are plausible but only correct ones are actually right
-6. Update solution to match the corrected answer
-7. Maintain the same difficulty level and educational value
+4. For NAT: Ensure the answer is STRICTLY numerical (integer or decimal only, no text/units)
+5. Fix mathematical errors in options or answer
+6. Ensure options are plausible but only correct ones are actually right
+7. Update solution to match the corrected answer
+8. Maintain the same difficulty level and educational value
+9. VARY the position of correct answers - don't always put correct answer in option A
+
+CRITICAL JSON ESCAPING RULES:
+- Use double backslashes (\\\\) for ALL LaTeX commands: "\\\\frac{1}{2}" not "\\frac{1}{2}"
+- Escape quotes within strings: "He said \\"hello\\"" not "He said "hello""
+- No unescaped backslashes or quotes in JSON strings
 
 RESPONSE FORMAT (JSON only):
 {
@@ -996,10 +1018,12 @@ RESPONSE FORMAT (JSON only):
 }
 
 CRITICAL: 
-- Return ONLY valid JSON
-- Use double backslashes (\\\\) for LaTeX commands
+- Return ONLY valid JSON with proper escaping
+- Use double backslashes (\\\\\\\\) for LaTeX commands in JSON
 - Ensure the answer exactly matches the options for MCQ/MSQ
+- For NAT questions, answer must be purely numerical
 - Keep the same question type and educational intent
+- Randomize correct answer positions for MCQ questions
 `;
 
       const result = await model.generateContent([prompt]);
@@ -1068,16 +1092,22 @@ RULES:
 1. For MCQ: Ensure exactly ONE of the 4 options matches the correct answer
 2. For MSQ: Ensure the correct answer options are present (can be 1, 2, 3, or 4 options)
 3. Keep mathematical expressions in their simplest, most standard form (e.g., π/3, not 1.047...)
-4. Replace the LEAST relevant/most obviously wrong option with the correct answer
+4. RANDOMIZE which option position gets the correct answer (don't always use A or D)
 5. Maintain consistent formatting and difficulty level
 6. Ensure all options are plausible but only the correct one(s) are actually correct
 7. For MSQ, if answer is "A,C", ensure options A and C are correct, B and D are incorrect
 
 CORRECTION STRATEGY:
-- Identify which option is least relevant or most obviously incorrect
+- Randomly choose which option position to place the correct answer
 - Replace it with the correct answer in proper format
 - Ensure the correct answer fits naturally with other options
 - Maintain mathematical/scientific notation consistency
+- Vary the correct answer position to avoid predictable patterns
+
+CRITICAL JSON ESCAPING RULES:
+- Use double backslashes (\\\\) for ALL LaTeX commands: "\\\\frac{1}{2}" not "\\frac{1}{2}"
+- Escape quotes within strings: "He said \\"hello\\"" not "He said "hello""
+- No unescaped backslashes or quotes in JSON strings
 
 RESPONSE FORMAT (JSON only):
 {
@@ -1085,7 +1115,7 @@ RESPONSE FORMAT (JSON only):
   "explanation": "Brief explanation of what was corrected"
 }
 
-CRITICAL: Return ONLY valid JSON. Use double backslashes (\\\\) for LaTeX commands.
+CRITICAL: Return ONLY valid JSON with proper escaping. Use double backslashes (\\\\\\\\) for LaTeX commands in JSON.
 `;
 
       const result = await model.generateContent([prompt]);
@@ -1297,20 +1327,26 @@ CRITICAL: Return ONLY valid JSON. Use double backslashes (\\\\) for LaTeX comman
 
 // Robust JSON extraction helper function
 function extractJsonFromText(text: string): string | null {
+  // Clean the text first - remove any obvious formatting issues
+  let cleanedText = text.replace(/```json\s*/g, '').replace(/```\s*/g, '');
+  
   // First try to find JSON in code blocks
   const codeBlockMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
   if (codeBlockMatch) {
-    return codeBlockMatch[1].trim();
+    let jsonContent = codeBlockMatch[1].trim();
+    // Fix common escaping issues
+    jsonContent = fixJsonEscaping(jsonContent);
+    return jsonContent;
   }
   
   // Find the first occurrence of [ or {
   let startIndex = -1;
   let startChar = '';
   
-  for (let i = 0; i < text.length; i++) {
-    if (text[i] === '[' || text[i] === '{') {
+  for (let i = 0; i < cleanedText.length; i++) {
+    if (cleanedText[i] === '[' || cleanedText[i] === '{') {
       startIndex = i;
-      startChar = text[i];
+      startChar = cleanedText[i];
       break;
     }
   }
@@ -1323,8 +1359,8 @@ function extractJsonFromText(text: string): string | null {
   const endChar = startChar === '[' ? ']' : '}';
   let endIndex = -1;
   
-  for (let i = text.length - 1; i >= startIndex; i--) {
-    if (text[i] === endChar) {
+  for (let i = cleanedText.length - 1; i >= startIndex; i--) {
+    if (cleanedText[i] === endChar) {
       endIndex = i;
       break;
     }
@@ -1334,5 +1370,25 @@ function extractJsonFromText(text: string): string | null {
     return null;
   }
   
-  return text.substring(startIndex, endIndex + 1);
+  let jsonContent = cleanedText.substring(startIndex, endIndex + 1);
+  // Fix common escaping issues
+  jsonContent = fixJsonEscaping(jsonContent);
+  return jsonContent;
+}
+
+// Helper function to fix common JSON escaping issues
+function fixJsonEscaping(jsonString: string): string {
+  // Fix unescaped backslashes in LaTeX (but not already escaped ones)
+  jsonString = jsonString.replace(/(?<!\\)\\(?!\\|"|\/|b|f|n|r|t|u)/g, '\\\\');
+  
+  // Fix unescaped quotes within strings (basic approach)
+  // This is a simplified fix - more complex scenarios might need better handling
+  jsonString = jsonString.replace(/"([^"]*)"([^"]*)"([^"]*)"/g, (match, p1, p2, p3) => {
+    if (p2.includes(':') || p2.includes(',') || p2.includes('{') || p2.includes('}')) {
+      return match; // Don't modify if it looks like JSON structure
+    }
+    return `"${p1}\\"${p2}\\"${p3}"`;
+  });
+  
+  return jsonString;
 }
